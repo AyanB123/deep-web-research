@@ -1,0 +1,7 @@
+.env
+research_agent.log
+
+# Ignore all files in the crawler directory
+venv/*
+
+__pycache__/*
