@@ -1,0 +1,368 @@
+Comprehensive Dark Web Crawling and Discovery Architecture
+Based on your codebase, I'll outline a detailed approach to enhance your system's ability to discover, access, and analyze onion sites across the dark web.
+
+1. Onion Link Discovery and Database
+A. Create an OnionLinkDatabase Class
+python
+CopyInsert
+class OnionLinkDatabase:
+    def __init__(self, db_path="onion_links.db"):
+        self.db_path = db_path
+        self._init_db()
+        
+    def _init_db(self):
+        import sqlite3
+        self.conn = sqlite3.connect(self.db_path)
+        self.cursor = self.conn.cursor()
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS onion_links (
+            id INTEGER PRIMARY KEY,
+            url TEXT UNIQUE,
+            title TEXT,
+            description TEXT,
+            category TEXT,
+            last_checked TIMESTAMP,
+            status TEXT,
+            discovery_source TEXT,
+            trust_score REAL
+        )
+        ''')
+        self.conn.commit()
+    
+    def add_link(self, url, title="", description="", category="", discovery_source=""):
+        import datetime
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO onion_links (url, title, description, category, last_checked, status, discovery_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (url, title, description, category, datetime.datetime.now(), "new", discovery_source)
+        )
+        self.conn.commit()
+        
+    def update_link_status(self, url, status, title="", description=""):
+        import datetime
+        self.cursor.execute(
+            "UPDATE onion_links SET status=?, last_checked=?, title=?, description=? WHERE url=?",
+            (status, datetime.datetime.now(), title, description, url)
+        )
+        self.conn.commit()
+        
+    def get_links_by_category(self, category, limit=50):
+        self.cursor.execute("SELECT url, title, description FROM onion_links WHERE category=? LIMIT ?", (category, limit))
+        return self.cursor.fetchall()
+        
+    def get_unchecked_links(self, limit=20):
+        self.cursor.execute("SELECT url FROM onion_links WHERE status='new' ORDER BY id LIMIT ?", (limit,))
+        return [row[0] for row in self.cursor.fetchall()]
+        
+    def close(self):
+        if self.conn:
+            self.conn.close()
+2. Initial Seed Data Sources
+A. Add Seed Directory Sites
+python
+CopyInsert
+def seed_initial_directories(db):
+    """Populate database with known dark web directory sites"""
+    seed_sites = [
+        {"url": "http://darkfailllnkf4vf.onion", "title": "Dark.fail", "category": "directory", 
+         "description": "Dark web market directory with verified links"},
+        {"url": "http://hiddenwikitor.net", "title": "Hidden Wiki", "category": "directory",
+         "description": "Directory of dark web services"},
+        {"url": "http://thedarkweblinks.com", "title": "Dark Web Links", "category": "directory",
+         "description": "Categorized listing of dark web sites"},
+        {"url": "http://ahmia.fi", "title": "Ahmia", "category": "search_engine",
+         "description": "Dark web search engine for Tor hidden services"},
+        {"url": "http://3bbad7fauom4d6sgppalyqddsqbf5u5p56b5k5uk2zxsy3d6ey2jobad.onion", "title": "Torch", 
+         "category": "search_engine", "description": "One of the oldest Tor search engines"},
+        {"url": "http://darksearch.io", "title": "DarkSearch", "category": "search_engine",
+         "description": "Dark web search engine with API access"}
+    ]
+    
+    for site in seed_sites:
+        db.add_link(**site)
+3. Enhanced Crawler Architecture
+A. Modify TorCrawler Class
+python
+CopyInsert
+class EnhancedTorCrawler(TorCrawler):
+    def __init__(self, link_db=None):
+        super().__init__()
+        self.link_db = link_db or OnionLinkDatabase()
+        
+    def discover_from_directories(self, max_sites=5):
+        """Extract links from directory sites"""
+        directories = self.link_db.get_links_by_category("directory", limit=max_sites)
+        discovered_count = 0
+        
+        for dir_url, dir_title, _ in directories:
+            try:
+                log_action(f"Crawling directory: {dir_title} ({dir_url})")
+                data = self.crawl_onion(dir_url, max_depth=1)  # Shallow crawl for directories
+                
+                # Extract and store all found onion links
+                for link in data["links"]:
+                    if ".onion" in link:
+                        self.link_db.add_link(url=link, discovery_source=dir_url)
+                        discovered_count += 1
+                        
+                # Update the directory's status
+                self.link_db.update_link_status(dir_url, "crawled", 
+                                               title=dir_title or "Directory Site")
+                                               
+            except Exception as e:
+                log_action(f"Error crawling directory {dir_url}: {str(e)}")
+                self.link_db.update_link_status(dir_url, "error")
+                
+        return discovered_count
+                
+    def search_engines_query(self, query, max_engines=3):
+        """Query dark web search engines"""
+        engines = self.link_db.get_links_by_category("search_engine", limit=max_engines)
+        results = []
+        
+        for engine_url, engine_title, _ in engines:
+            try:
+                log_action(f"Querying search engine: {engine_title}")
+                
+                # Different search engines have different query formats
+                search_url = self._format_search_url(engine_url, query)
+                data = self.crawl_onion(search_url, max_depth=1)
+                
+                # Extract search results (links) and store them
+                for link in data["links"]:
+                    if ".onion" in link and link != engine_url:
+                        self.link_db.add_link(url=link, discovery_source=f"search:{engine_title}")
+                        results.append(link)
+                
+            except Exception as e:
+                log_action(f"Error querying search engine {engine_url}: {str(e)}")
+                
+        return results
+    
+    def _format_search_url(self, engine_url, query):
+        """Format search query for different engines"""
+        query_encoded = requests.utils.quote(query)
+        
+        # Different formatting for different engines
+        if "ahmia" in engine_url:
+            return f"{engine_url}/search/?q={query_encoded}"
+        elif "torch" in engine_url:
+            return f"{engine_url}/search?query={query_encoded}"
+        else:
+            return f"{engine_url}/search?q={query_encoded}"
+            
+    def batch_crawl(self, batch_size=10):
+        """Crawl a batch of unchecked onion links"""
+        links = self.link_db.get_unchecked_links(limit=batch_size)
+        results = []
+        
+        for link in links:
+            try:
+                log_action(f"Crawling discovered link: {link}")
+                data = self.crawl_onion(link, max_depth=1)
+                
+                # Update link status with title from crawled page
+                title = self._extract_title(data["content"])
+                self.link_db.update_link_status(link, "crawled", title=title)
+                
+                # Store any new discovered links
+                for new_link in data["links"]:
+                    if ".onion" in new_link:
+                        self.link_db.add_link(url=new_link, discovery_source=link)
+                
+                results.append({"url": link, "data": data})
+                
+            except Exception as e:
+                log_action(f"Error crawling {link}: {str(e)}")
+                self.link_db.update_link_status(link, "error")
+                
+        return results
+        
+    def _extract_title(self, content):
+        """Extract title from page content"""
+        import re
+        title_match = re.search("<title>(.*?)</title>", content, re.IGNORECASE)
+        if title_match:
+            return title_match.group(1)
+        return ""
+4. Integration with Your Current Architecture
+A. Modify Agent.py to Use Enhanced Crawler
+python
+CopyInsert
+from enhanced_crawler import EnhancedTorCrawler, OnionLinkDatabase
+
+class TorSearchTool(BaseTool):
+    name: str = "tor_search"
+    description: str = "Crawls onion sites for dark web content."
+    
+    def __init__(self):
+        super().__init__()
+        self.link_db = OnionLinkDatabase()
+        
+    def _run(self, query: str):
+        crawler = EnhancedTorCrawler(self.link_db)
+        
+        # First, try to discover new sites from directories
+        log_action("Discovering new onion sites from directories...")
+        discovered = crawler.discover_from_directories(max_sites=3)
+        log_action(f"Discovered {discovered} new potential onion links")
+        
+        # Then search using dark web search engines
+        log_action(f"Querying dark web search engines for: {query}")
+        search_results = crawler.search_engines_query(query, max_engines=2)
+        log_action(f"Found {len(search_results)} results from search engines")
+        
+        # Crawl a batch of sites
+        log_action("Crawling batch of onion sites...")
+        data = crawler.batch_crawl(batch_size=15)
+        
+        crawler.close()
+        return data
+B. Add Site Categorization in Knowledge Base
+python
+CopyInsert
+# Add to knowledge_base.py
+class KnowledgeBase:
+    # ... existing code ...
+    
+    def categorize_onion_site(self, url, content):
+        """Use Gemini to categorize an onion site based on its content"""
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from config import Config
+        
+        categorizer = ChatGoogleGenerativeAI(
+            model=Config.DEFAULT_MODEL,
+            google_api_key=Config.GEMINI_API_KEY,
+            temperature=0.2
+        )
+        
+        prompt = f"""
+        Analyze this dark web content and categorize it into one of these categories:
+        - marketplace
+        - forum
+        - news
+        - services
+        - financial
+        - social
+        - other
+        
+        Content from {url}:
+        {content[:2000]}
+        
+        Return ONLY the category name and nothing else.
+        """
+        
+        category = categorizer.invoke(prompt).content.strip().lower()
+        return category
+C. Add to Config.py
+python
+CopyInsert
+# Add to config.py
+class Config:
+    # ... existing code ...
+    ONION_DB_PATH = "onion_links.db"
+    DISCOVERY_SITES_LIMIT = 5
+    SEARCH_ENGINES_LIMIT = 3
+    BATCH_CRAWL_SIZE = 15
+    CONTENT_CATEGORIZATION_ENABLED = True
+5. Enhanced UI in app.py
+python
+CopyInsert
+# Add to app.py in the sidebar section
+with st.sidebar:
+    # ... existing code ...
+    st.subheader("Dark Web Discovery")
+    discovery_mode = st.selectbox("Discovery Mode", [
+        "Passive (Use existing database)", 
+        "Active (Discover new sites)", 
+        "Aggressive (Maximum discovery)"
+    ])
+    
+    if st.button("View Onion Database Stats"):
+        from enhanced_crawler import OnionLinkDatabase
+        db = OnionLinkDatabase()
+        db.cursor.execute("SELECT category, COUNT(*) FROM onion_links GROUP BY category")
+        categories = db.cursor.fetchall()
+        
+        st.write("Onion Links by Category:")
+        for category, count in categories:
+            st.write(f"- {category.title()}: {count}")
+            
+        db.cursor.execute("SELECT status, COUNT(*) FROM onion_links GROUP BY status")
+        statuses = db.cursor.fetchall()
+        
+        st.write("Links by Status:")
+        for status, count in statuses:
+            st.write(f"- {status.title()}: {count}")
+        
+        db.close()
+6. Deployment Considerations
+Security: This system accesses sensitive dark web content - ensure all connections are through Tor
+Legal Compliance: Add content filtering to avoid storing illegal content
+Database Backup: Implement regular backups of the onion link database
+Rate Limiting: Dark web crawling should be slow and respectful to avoid detection
+Reliability: Implement robust error handling as dark web sites are often unstable
+7. Implementation Plan
+Create the OnionLinkDatabase class first
+Implement seed data population
+Develop the enhanced crawler
+Integrate with your existing agent architecture
+Add UI components for visibility and control
+Test with increasingly broader discovery settings
+This architecture will provide your system with comprehensive access to the dark web while maintaining a structured approach to discovery and analysis. The database-driven approach ensures you maintain knowledge of sites over time, even as they change or go offline.
+
+Feedback submitted
+Me
+
+think deeply create detailed plan for step 1 once done startt imp code mod for my codebase
+
+Revert
+Thought Process
+
+
+Detailed Implementation Plan for OnionLinkDatabase
+I'll create a comprehensive plan for implementing the OnionLinkDatabase class, then start modifying your codebase.
+
+Step 1: OnionLinkDatabase Implementation Plan
+1.1 Database Schema Design
+The OnionLinkDatabase will use SQLite to store onion links with the following schema:
+
+sql
+CopyInsert
+CREATE TABLE IF NOT EXISTS onion_links (
+    id INTEGER PRIMARY KEY,
+    url TEXT UNIQUE,
+    title TEXT,
+    description TEXT,
+    category TEXT,
+    content_preview TEXT,
+    last_checked TIMESTAMP,
+    status TEXT,  -- 'new', 'active', 'inactive', 'error', 'blacklisted'
+    discovery_source TEXT,
+    trust_score REAL,
+    tags TEXT,  -- JSON array of tags
+    metadata TEXT -- JSON for additional metadata
+)
+1.2 Core Functionality Requirements
+The OnionLinkDatabase class will provide these core functions:
+
+Initialize/create database
+Add new links with metadata
+Update link status and information
+Query links by various filters (category, status, etc.)
+Batch operations for efficiency
+Database maintenance (cleanup, indexing)
+Export/import capabilities
+1.3 Integration Points
+Integration with existing code will require:
+
+Importing the OnionLinkDatabase in TorCrawler
+Adding new configuration parameters in Config.py
+Adding database path to environment variables
+Creating utility functions for database initialization
+1.4 Implementation Steps
+Create a new file onion_database.py
+Implement the OnionLinkDatabase class with all required methods
+Add unit tests to verify functionality
+Update Config.py with new configuration parameters
+Create database initialization script
+Let's start implementing the code modifications now.

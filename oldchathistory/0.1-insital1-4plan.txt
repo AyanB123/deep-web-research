@@ -1,0 +1,840 @@
+Detailed Implementation Plans
+1. Tor Connection Fallback & Error Handling
+Approach Overview
+Create a robust error handling system that gracefully manages Tor connection failures and allows seamless fallback to clearnet APIs when necessary.
+
+Implementation Steps
+1.1. Create a ConnectionManager Class
+python
+CopyInsert
+# File: connection_manager.py
+class ConnectionManager:
+    def __init__(self, tor_enabled=True, clearnet_fallback=True):
+        self.tor_enabled = tor_enabled
+        self.clearnet_fallback = clearnet_fallback
+        self.tor_session = None
+        self.clearnet_session = None
+        self.current_circuit_age = 0
+        self.max_circuit_age = 30  # minutes
+        
+    def get_session(self, force_clearnet=False):
+        """Get the appropriate session based on availability and settings"""
+        if force_clearnet or not self.tor_enabled:
+            return self._get_clearnet_session()
+            
+        # Try Tor first if enabled
+        if self.tor_session is None or self._should_rotate_circuit():
+            tor_success = self._initialize_tor_session()
+            if not tor_success and self.clearnet_fallback:
+                log_action("Falling back to clearnet session")
+                return self._get_clearnet_session()
+                
+        return self.tor_session
+        
+    def _initialize_tor_session(self):
+        """Initialize Tor session with error handling"""
+        try:
+            # Implementation details for Tor session setup
+            return True
+        except Exception as e:
+            log_action(f"Tor initialization error: {str(e)}")
+            return False
+            
+    def _get_clearnet_session(self):
+        """Get or create clearnet session"""
+        # Implementation for regular requests session
+        
+    def _should_rotate_circuit(self):
+        """Check if we should rotate the Tor circuit"""
+        # Logic for circuit rotation based on time or request count
+1.2. Add Retry Logic with Exponential Backoff
+python
+CopyInsert
+# File: retry_utils.py
+def retry_with_backoff(function, max_retries=3, initial_delay=1, backoff_factor=2):
+    """
+    Execute a function with exponential backoff retry logic
+    
+    Args:
+        function: Function to execute
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds
+        backoff_factor: Multiplicative factor for backoff
+        
+    Returns:
+        Result of the function or raises the last exception
+    """
+    last_exception = None
+    delay = initial_delay
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return function()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                log_action(f"Attempt {attempt+1} failed. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay *= backoff_factor
+            else:
+                log_action(f"All {max_retries+1} attempts failed.")
+                
+    raise last_exception
+1.3. Create Tavily API Integration for Clearnet Fallback
+python
+CopyInsert
+# File: clearnet_search.py
+class TavilySearch:
+    def __init__(self, api_key=Config.TAVILY_API_KEY):
+        self.api_key = api_key
+        
+    def search(self, query, max_results=10):
+        """
+        Perform a clearnet search using Tavily API
+        
+        Args:
+            query: Search query
+            max_results: Maximum number of results
+            
+        Returns:
+            List of search results
+        """
+        if not self.api_key:
+            log_action("Tavily API key not configured for clearnet fallback")
+            return []
+            
+        try:
+            # Implementation of Tavily API request
+            # Return formatted results
+        except Exception as e:
+            log_action(f"Tavily API error: {str(e)}")
+            return []
+1.4. Enhance EnhancedTorCrawler for Error Recovery
+python
+CopyInsert
+# Modifications to enhanced_crawler.py
+class EnhancedTorCrawler:
+    def __init__(self, link_db=None):
+        # Existing initialization
+        self.connection_manager = ConnectionManager(
+            tor_enabled=Config.TOR_ENABLED,
+            clearnet_fallback=Config.CLEARNET_FALLBACK_ENABLED
+        )
+        self.tavily_search = TavilySearch() if Config.CLEARNET_FALLBACK_ENABLED else None
+        self.error_count = 0
+        self.max_consecutive_errors = 5
+        
+    def crawl_with_recovery(self, url, max_depth=Config.CRAWL_DEPTH):
+        """Crawl with automatic recovery from failures"""
+        try:
+            return retry_with_backoff(
+                lambda: self.crawl_onion(url, max_depth),
+                max_retries=3
+            )
+        except Exception as e:
+            self.error_count += 1
+            if self.error_count >= self.max_consecutive_errors:
+                log_action("Too many consecutive errors, switching to clearnet mode")
+                # Switch to clearnet fallback
+                return self._clearnet_fallback(url)
+            return {"url": url, "content": "", "links": [], "errors": [str(e)]}
+            
+    def _clearnet_fallback(self, url):
+        """Attempt to get data via clearnet APIs instead"""
+        if not self.tavily_search:
+            return {"url": url, "content": "", "links": [], "errors": ["No clearnet fallback available"]}
+            
+        # Extract search terms from URL and use clearnet search
+        search_terms = self._extract_search_terms(url)
+        results = self.tavily_search.search(search_terms)
+        
+        # Format results to match crawl_onion output
+        return {
+            "url": url,
+            "content": "\n\n".join([r.get("content", "") for r in results]),
+            "links": [r.get("url") for r in results],
+            "errors": [],
+            "from_clearnet": True
+        }
+2. Content Filtering Implementation
+Approach Overview
+Implement NSFW content filtering using Gemini AI to categorize and filter potentially inappropriate content before storing in the database or presenting to users.
+
+Implementation Steps
+2.1. Create Content Safety Classifier
+python
+CopyInsert
+# File: content_safety.py
+class ContentSafetyClassifier:
+    def __init__(self, model_name=Config.DEFAULT_MODEL):
+        self.model = ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=Config.GEMINI_API_KEY,
+            temperature=0.1  # Low temperature for more deterministic results
+        )
+        
+    def classify_content(self, content, url=""):
+        """
+        Classify content for safety concerns
+        
+        Args:
+            content: Text content to classify
+            url: Source URL (optional)
+            
+        Returns:
+            dict: Classification results with categories and confidence scores
+        """
+        # Truncate content to reasonable length
+        truncated_content = content[:5000]
+        
+        prompt = f"""
+        Analyze the following content from a dark web site and classify it into these safety categories:
+        1. NSFW (pornographic or explicit sexual content)
+        2. Violence (graphic violence, gore, or abuse)
+        3. Illegal activity (specific instructions for illegal activities)
+        4. Hate speech (content promoting hatred or discrimination)
+        5. Harassment (targeted harassment or bullying)
+        6. Self-harm (content promoting self-harm)
+        7. Child exploitation (any content related to child exploitation)
+        
+        For each category, provide a score from 0-10 where:
+        0 = definitely not present
+        10 = definitely present
+        
+        Content from {url}:
+        {truncated_content}
+        
+        Return only a JSON object with the category scores, nothing else.
+        """
+        
+        try:
+            response = self.model.invoke(prompt).content.strip()
+            # Parse JSON response
+            import json
+            scores = json.loads(response)
+            return scores
+        except Exception as e:
+            log_action(f"Error classifying content safety: {str(e)}")
+            return {
+                "NSFW": 0, "Violence": 0, "Illegal activity": 0,
+                "Hate speech": 0, "Harassment": 0, "Self-harm": 0, "Child exploitation": 0,
+                "error": str(e)
+            }
+    
+    def is_safe_content(self, content, url="", threshold=7):
+        """
+        Check if content is safe based on classification
+        
+        Args:
+            content: Text content to check
+            url: Source URL (optional)
+            threshold: Score threshold for unsafe content (0-10)
+            
+        Returns:
+            tuple: (is_safe, categories_exceeding_threshold)
+        """
+        scores = self.classify_content(content, url)
+        unsafe_categories = {k: v for k, v in scores.items() if v >= threshold and k != "error"}
+        return (len(unsafe_categories) == 0, unsafe_categories)
+    
+    def get_filtered_content(self, content, url="", threshold=7):
+        """
+        Get filtered version of content if unsafe
+        
+        Args:
+            content: Original content
+            url: Source URL (optional)
+            threshold: Score threshold for unsafe content (0-10)
+            
+        Returns:
+            tuple: (filtered_content, was_filtered, filter_reason)
+        """
+        is_safe, unsafe_categories = self.is_safe_content(content, url, threshold)
+        
+        if is_safe:
+            return (content, False, None)
+            
+        # Generate a sanitized version
+        filter_reason = ", ".join(unsafe_categories.keys())
+        filtered_content = f"[Content filtered due to safety concerns: {filter_reason}]"
+        return (filtered_content, True, filter_reason)
+2.2. Integrate with EnhancedTorCrawler
+python
+CopyInsert
+# Modifications to enhanced_crawler.py
+class EnhancedTorCrawler:
+    def __init__(self, link_db=None):
+        # Existing initialization
+        self.content_safety = ContentSafetyClassifier() if Config.NSFW_CONTENT_FILTERING else None
+        
+    def crawl_onion(self, url, max_depth=Config.CRAWL_DEPTH, store_in_db=True):
+        # Existing crawl logic
+        
+        # Add content filtering before storing
+        if self.content_safety and Config.NSFW_CONTENT_FILTERING:
+            filtered_content, was_filtered, filter_reason = self.content_safety.get_filtered_content(
+                crawled_data["content"], url
+            )
+            
+            if was_filtered:
+                log_action(f"Content filtered from {url}: {filter_reason}")
+                crawled_data["content"] = filtered_content
+                crawled_data["was_filtered"] = True
+                crawled_data["filter_reason"] = filter_reason
+                
+                # Update metadata if storing in DB
+                if store_in_db:
+                    metadata = {"filtered": True, "filter_reason": filter_reason}
+                    # Add to existing metadata
+                    # [implementation details]
+        
+        # Continue with rest of the method
+2.3. Add Safety Configuration to Config
+python
+CopyInsert
+# Add to config.py
+class Config:
+    # Existing configuration
+    
+    # Content Safety Settings
+    NSFW_CONTENT_FILTERING = True
+    SAFETY_THRESHOLD = 7  # 0-10 scale
+    SAFETY_CATEGORIES = ["NSFW", "Violence", "Illegal activity", "Child exploitation"]
+    FILTER_ALL_CATEGORIES = True  # If False, only filter SAFETY_CATEGORIES
+2.4. Add UI Controls for Safety Filtering
+python
+CopyInsert
+# Add to app.py, in the sidebar configuration section
+with st.sidebar:
+    # Existing sidebar code
+    
+    # Content Safety Settings
+    st.subheader("Content Safety")
+    enable_filtering = st.checkbox("Enable Content Filtering", value=Config.NSFW_CONTENT_FILTERING)
+    safety_threshold = st.slider("Safety Threshold", 1, 10, Config.SAFETY_THRESHOLD, 
+                                help="Higher values allow more content through")
+    
+    # Update config with UI selections
+    Config.NSFW_CONTENT_FILTERING = enable_filtering
+    Config.SAFETY_THRESHOLD = safety_threshold
+3. Parallel Crawling Implementation
+Approach Overview
+Implement concurrent crawling with proper rate limiting and connection management to significantly improve crawling performance while respecting site limitations.
+
+Implementation Steps
+3.1. Create a Crawler Pool Manager
+python
+CopyInsert
+# File: crawler_pool.py
+import concurrent.futures
+import time
+import random
+from threading import Lock
+
+class CrawlerPool:
+    def __init__(self, max_workers=5, rate_limit_per_domain=1.0):
+        """
+        Initialize a crawler pool for parallel crawling
+        
+        Args:
+            max_workers: Maximum number of parallel crawlers
+            rate_limit_per_domain: Minimum seconds between requests to same domain
+        """
+        self.max_workers = max_workers
+        self.rate_limit = rate_limit_per_domain
+        self.domain_last_crawl = {}  # Domain -> timestamp
+        self.domain_lock = Lock()
+        
+    def crawl_batch(self, crawler, urls, max_depth=1):
+        """
+        Crawl a batch of URLs in parallel
+        
+        Args:
+            crawler: EnhancedTorCrawler instance
+            urls: List of URLs to crawl
+            max_depth: Maximum crawl depth
+            
+        Returns:
+            dict: URL -> crawl results
+        """
+        results = {}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all crawl tasks
+            future_to_url = {
+                executor.submit(self._rate_limited_crawl, crawler, url, max_depth): url
+                for url in urls
+            }
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    results[url] = future.result()
+                except Exception as e:
+                    log_action(f"Error crawling {url}: {str(e)}")
+                    results[url] = {
+                        "url": url, 
+                        "content": "", 
+                        "links": [], 
+                        "errors": [str(e)]
+                    }
+                    
+        return results
+    
+    def _rate_limited_crawl(self, crawler, url, max_depth):
+        """
+        Crawl with rate limiting per domain
+        
+        Args:
+            crawler: EnhancedTorCrawler instance
+            url: URL to crawl
+            max_depth: Maximum crawl depth
+            
+        Returns:
+            dict: Crawl results
+        """
+        domain = self._extract_domain(url)
+        
+        # Check and update domain rate limiting
+        with self.domain_lock:
+            now = time.time()
+            last_crawl = self.domain_last_crawl.get(domain, 0)
+            delay_needed = max(0, self.rate_limit - (now - last_crawl))
+            
+            if delay_needed > 0:
+                # Add some randomness to avoid patterns
+                jitter = random.uniform(0, 0.5)
+                time.sleep(delay_needed + jitter)
+                
+            # Update last crawl time
+            self.domain_last_crawl[domain] = time.time()
+            
+        # Perform the actual crawl
+        return crawler.crawl_onion(url, max_depth=max_depth)
+    
+    def _extract_domain(self, url):
+        """Extract domain from URL for rate limiting"""
+        # Parse URL and extract domain
+        # [implementation details]
+        return domain
+3.2. Enhance Batch Crawling in EnhancedTorCrawler
+python
+CopyInsert
+# Modifications to enhanced_crawler.py
+class EnhancedTorCrawler:
+    def __init__(self, link_db=None):
+        # Existing initialization
+        self.parallel_enabled = Config.PARALLEL_CRAWLING_ENABLED
+        self.max_workers = Config.MAX_CRAWLER_WORKERS
+        self.crawler_pool = CrawlerPool(
+            max_workers=self.max_workers,
+            rate_limit_per_domain=Config.CRAWL_DELAY_MIN
+        )
+        
+    def batch_crawl(self, batch_size=Config.BATCH_CRAWL_SIZE):
+        """Crawl a batch of unchecked or outdated onion links."""
+        # Get links that need to be crawled
+        links = self.link_db.get_unchecked_links(
+            limit=batch_size, 
+            older_than_hours=Config.RECRAWL_HOURS
+        )
+        
+        results = {
+            "total": len(links),
+            "successful": 0,
+            "failed": 0,
+            "new_links_discovered": 0
+        }
+        
+        if not links:
+            return results
+            
+        if self.parallel_enabled and len(links) > 1:
+            # Use parallel crawling for multiple links
+            crawl_results = self.crawler_pool.crawl_batch(
+                self, links, max_depth=1
+            )
+            
+            # Process results
+            for url, data in crawl_results.items():
+                if not data.get("errors"):
+                    results["successful"] += 1
+                    results["new_links_discovered"] += len(data.get("links", []))
+                else:
+                    results["failed"] += 1
+        else:
+            # Use sequential crawling
+            for link in links:
+                try:
+                    log_action(f"Batch crawling: {link}")
+                    data = self.crawl_onion(link, max_depth=1, store_in_db=True)
+                    
+                    if not data["errors"]:
+                        results["successful"] += 1
+                        results["new_links_discovered"] += len(data["links"])
+                    else:
+                        results["failed"] += 1
+                    
+                    # Apply delay between crawls
+                    randomize_delay(Config.CRAWL_DELAY_MIN, Config.CRAWL_DELAY_MAX)
+                    
+                except Exception as e:
+                    log_action(f"Error in batch crawl for {link}: {str(e)}")
+                    results["failed"] += 1
+        
+        log_action(f"Batch crawl completed: {results['successful']} successful, {results['failed']} failed")
+        return results
+3.3. Add Parallel Crawling Configuration
+python
+CopyInsert
+# Add to config.py
+class Config:
+    # Existing configuration
+    
+    # Parallel Crawling Settings
+    PARALLEL_CRAWLING_ENABLED = True
+    MAX_CRAWLER_WORKERS = 5
+    DOMAIN_RATE_LIMIT = 2.0  # Seconds between requests to same domain
+3.4. Add UI Controls for Parallel Crawling
+python
+CopyInsert
+# Add to app.py, in the discovery settings section
+with st.sidebar:
+    # Existing discovery settings
+    
+    st.subheader("Advanced Crawling")
+    enable_parallel = st.checkbox("Enable Parallel Crawling", value=Config.PARALLEL_CRAWLING_ENABLED)
+    if enable_parallel:
+        worker_count = st.slider("Worker Count", 2, 10, Config.MAX_CRAWLER_WORKERS)
+    
+    # Update config with UI selections
+    Config.PARALLEL_CRAWLING_ENABLED = enable_parallel
+    if enable_parallel:
+        Config.MAX_CRAWLER_WORKERS = worker_count
+4. Testing Framework Implementation
+Approach Overview
+Create a comprehensive testing framework that includes unit tests, integration tests, and mocks for TOR services to ensure reliability and facilitate ongoing development.
+
+Implementation Steps
+4.1. Create Basic Testing Structure
+python
+CopyInsert
+# File: tests/__init__.py
+# Empty file to make tests directory a package
+python
+CopyInsert
+# File: tests/test_config.py
+import os
+import unittest
+from config import Config
+
+class TestConfig(unittest.TestCase):
+    def test_config_initialization(self):
+        """Test that Config properly initializes"""
+        self.assertIsNotNone(Config.ONION_DB_PATH)
+        self.assertIsNotNone(Config.CHROMA_DB_PATH)
+        
+    def test_directories_creation(self):
+        """Test directory creation functionality"""
+        # Clear directories if they exist
+        for dir_path in [Config.DATA_DIR, Config.EXPORT_DIR]:
+            if os.path.exists(dir_path):
+                import shutil
+                shutil.rmtree(dir_path)
+                
+        # Initialize directories
+        Config.init_directories()
+        
+        # Check directories were created
+        self.assertTrue(os.path.exists(Config.DATA_DIR))
+        self.assertTrue(os.path.exists(Config.EXPORT_DIR))
+4.2. Create Database Tests
+python
+CopyInsert
+# File: tests/test_onion_database.py
+import unittest
+import os
+import tempfile
+from onion_database import OnionLinkDatabase
+
+class TestOnionLinkDatabase(unittest.TestCase):
+    def setUp(self):
+        """Set up a test database"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "test_onion_db.db")
+        self.db = OnionLinkDatabase(db_path=self.db_path)
+        
+    def tearDown(self):
+        """Clean up test database"""
+        self.db.close()
+        self.temp_dir.cleanup()
+        
+    def test_add_link(self):
+        """Test adding a link to the database"""
+        # Add a test link
+        result = self.db.add_link(
+            url="http://test.onion",
+            title="Test Site",
+            description="A test onion site",
+            category="test"
+        )
+        
+        self.assertTrue(result)
+        
+        # Verify link was added
+        links = self.db.get_links_by_category("test")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["url"], "http://test.onion")
+        
+    def test_update_link(self):
+        """Test updating a link in the database"""
+        # Add a test link
+        self.db.add_link(url="http://test.onion", title="Initial Title")
+        
+        # Update the link
+        result = self.db.update_link(
+            url="http://test.onion",
+            title="Updated Title",
+            status="active"
+        )
+        
+        self.assertTrue(result)
+        
+        # Verify link was updated
+        links = self.db.get_links_by_status("active")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["title"], "Updated Title")
+        
+    # Add more tests for other database methods
+4.3. Create Crawler Tests with Mocks
+python
+CopyInsert
+# File: tests/test_enhanced_crawler.py
+import unittest
+from unittest.mock import MagicMock, patch
+from enhanced_crawler import EnhancedTorCrawler
+from onion_database import OnionLinkDatabase
+
+class TestEnhancedCrawler(unittest.TestCase):
+    def setUp(self):
+        """Set up test environment with mocks"""
+        # Mock the database
+        self.mock_db = MagicMock(spec=OnionLinkDatabase)
+        
+        # Create crawler with mock database
+        self.crawler = EnhancedTorCrawler(link_db=self.mock_db)
+        
+        # Mock the session for testing without Tor
+        self.mock_session = MagicMock()
+        self.crawler.session = self.mock_session
+        
+    def test_check_onion_status(self):
+        """Test the check_onion_status method"""
+        # Mock successful response
+        self.mock_session.head.return_value = MagicMock(status_code=200)
+        
+        # Test with a sample URL
+        result = self.crawler.check_onion_status("http://test.onion")
+        
+        # Verify the result
+        self.assertTrue(result)
+        self.mock_session.head.assert_called_once()
+        
+        # Verify history entry was added
+        self.mock_db.add_crawl_history.assert_called_once()
+        
+    @patch('enhanced_crawler.BeautifulSoup')
+    def test_crawl_onion(self, mock_bs):
+        """Test the crawl_onion method with mocked BeautifulSoup"""
+        # Mock response
+        mock_response = MagicMock()
+        mock_response.text = "<html><title>Test Site</title><body>Test content</body></html>"
+        self.mock_session.get.return_value = mock_response
+        
+        # Mock BeautifulSoup
+        mock_soup = MagicMock()
+        mock_soup.find.return_value.get_text.return_value = "Test Site"
+        mock_soup.get_text.return_value = "Test content"
+        mock_soup.find_all.return_value = [MagicMock(get=lambda x: "http://link1.onion")]
+        mock_bs.return_value = mock_soup
+        
+        # Test crawl_onion
+        result = self.crawler.crawl_onion("http://test.onion", max_depth=0)
+        
+        # Verify the result
+        self.assertEqual(result["url"], "http://test.onion")
+        self.assertEqual(result["title"], "Test Site")
+        self.assertEqual(result["content"], "Test content")
+        self.assertEqual(len(result["links"]), 1)
+        self.assertEqual(result["links"][0], "http://link1.onion")
+        
+        # Verify database update
+        self.mock_db.update_link.assert_called_once()
+4.4. Create Mock Tor Service for Testing
+python
+CopyInsert
+# File: tests/mock_tor_service.py
+class MockTorService:
+    """
+    Mock Tor service for testing without actual Tor network
+    
+    This provides a controlled environment for testing Tor-dependent code
+    with predictable responses.
+    """
+    def __init__(self):
+        self.registered_onions = {}  # URL -> content map
+        
+    def register_onion(self, url, content, title="", links=None):
+        """
+        Register a mock onion site
+        
+        Args:
+            url: Onion URL
+            content: HTML content
+            title: Page title
+            links: List of links on the page
+        """
+        self.registered_onions[url] = {
+            "content": content,
+            "title": title,
+            "links": links or []
+        }
+        
+    def get_mock_session(self):
+        """
+        Get a mock requests session that returns content from registered onions
+        
+        Returns:
+            MagicMock: Mocked session object
+        """
+        from unittest.mock import MagicMock
+        
+        mock_session = MagicMock()
+        
+        def mock_get(url, **kwargs):
+            mock_response = MagicMock()
+            
+            if url in self.registered_onions:
+                mock_response.status_code = 200
+                mock_response.text = self.registered_onions[url]["content"]
+            else:
+                # Simulate 404 for unregistered onions
+                mock_response.status_code = 404
+                mock_response.text = "<html><body>Not Found</body></html>"
+                mock_response.raise_for_status.side_effect = Exception("404 Not Found")
+                
+            return mock_response
+            
+        def mock_head(url, **kwargs):
+            mock_response = MagicMock()
+            
+            if url in self.registered_onions:
+                mock_response.status_code = 200
+            else:
+                mock_response.status_code = 404
+                
+            return mock_response
+            
+        mock_session.get = mock_get
+        mock_session.head = mock_head
+        
+        return mock_session
+4.5. Create Integration Test
+python
+CopyInsert
+# File: tests/test_integration.py
+import unittest
+import tempfile
+import os
+from config import Config
+from onion_database import OnionLinkDatabase
+from enhanced_crawler import EnhancedTorCrawler
+from tests.mock_tor_service import MockTorService
+
+class TestIntegration(unittest.TestCase):
+    def setUp(self):
+        """Set up test environment with temporary database"""
+        # Create temp directory for test files
+        self.temp_dir = tempfile.TemporaryDirectory()
+        
+        # Configure for testing
+        Config.DATA_DIR = self.temp_dir.name
+        Config.EXPORT_DIR = os.path.join(self.temp_dir.name, "exports")
+        Config.ONION_DB_PATH = os.path.join(self.temp_dir.name, "test_onion_db.db")
+        Config.init_directories()
+        
+        # Create database
+        self.db = OnionLinkDatabase(db_path=Config.ONION_DB_PATH)
+        
+        # Set up mock Tor service
+        self.mock_tor = MockTorService()
+        self.mock_tor.register_onion(
+            url="http://directory.onion",
+            content="<html><title>Directory</title><body>Test directory <a href='http://site1.onion'>Site 1</a></body></html>",
+            title="Directory",
+            links=["http://site1.onion"]
+        )
+        self.mock_tor.register_onion(
+            url="http://site1.onion",
+            content="<html><title>Site 1</title><body>Test content</body></html>",
+            title="Site 1"
+        )
+        
+        # Create crawler with mocked Tor session
+        self.crawler = EnhancedTorCrawler(link_db=self.db)
+        self.crawler.session = self.mock_tor.get_mock_session()
+        
+    def tearDown(self):
+        """Clean up test environment"""
+        self.db.close()
+        self.temp_dir.cleanup()
+        
+    def test_end_to_end_discovery(self):
+        """Test the entire discovery process end-to-end"""
+        # Add a directory site to the database
+        self.db.add_link(
+            url="http://directory.onion",
+            title="Directory",
+            category="directory"
+        )
+        
+        # Run discovery process
+        discovery_stats = self.crawler.discover_from_directories(max_sites=1)
+        
+        # Verify a link was discovered
+        self.assertEqual(discovery_stats, 1)
+        
+        # Verify site1 was added to the database
+        links = self.db.search_links("site1")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["url"], "http://site1.onion")
+        
+        # Test batch crawling
+        crawl_stats = self.crawler.batch_crawl(batch_size=5)
+        
+        # Verify crawl was successful
+        self.assertEqual(crawl_stats["successful"], 1)
+        self.assertEqual(crawl_stats["failed"], 0)
+4.6. Create Test Runner Script
+python
+CopyInsert
+# File: run_tests.py
+import unittest
+import sys
+
+def run_tests():
+    """Run all tests and return exit code"""
+    # Discover and load all tests
+    loader = unittest.TestLoader()
+    suite = loader.discover('tests', pattern='test_*.py')
+    
+    # Run the tests
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    
+    # Return non-zero exit code if tests failed
+    return 0 if result.wasSuccessful() else 1
+
+if __name__ == "__main__":
+    sys.exit(run
