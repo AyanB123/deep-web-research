@@ -650,11 +650,17 @@ class WebSocketManager:
         await self._broadcast(message, target_channel)
         if target_channel != "public":
             await self._broadcast(message, "public")
-            crawler_id (str): Unique ID of the crawler
-            url (str): URL being crawled
-            status (str): Status of the crawl (starting, running, completed, error)
-            progress (float): Progress percentage (0-100)
-            details (dict): Additional details
+
+    def emit_crawl_progress(self, crawler_id: str, url: str, status: str, progress: float, details: dict = None):
+        """
+        Emit crawl progress event.
+        
+        Args:
+            crawler_id: Unique ID of the crawler
+            url: URL being crawled
+            status: Status of the crawl (starting/running/completed/error)
+            progress: Progress percentage (0-100)
+            details: Additional details
         """
         details = details or {}
         
@@ -667,18 +673,20 @@ class WebSocketManager:
             **details
         })
     
-    def emit_discovery(self, url: str, source: str, details: Dict = None):
+    def emit_discovery(self, crawler_id: str, url: str, source: str, details: Dict = None):
         """
         Emit link discovery event.
         
         Args:
-            url (str): Discovered URL
-            source (str): Discovery source
-            details (dict): Additional details
+            crawler_id: ID of discovering crawler
+            url: Discovered URL
+            source: Discovery source
+            details: Additional details
         """
         details = details or {}
         
         self.emit_event("discovery", {
+            "crawler_id": crawler_id,
             "url": url,
             "source": source,
             "timestamp": datetime.datetime.now().isoformat(),

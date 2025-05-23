@@ -338,7 +338,7 @@ class WebSocketClient:
                     reconnect_interval * self.reconnect_decay,
                     self.max_reconnect_interval
                 )
-        Args:
+        """Args:
             ws: WebSocket instance
         """
         self.connected = True
